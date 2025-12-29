@@ -1,423 +1,314 @@
-import { useRef, useState, useEffect } from 'react';
-import { motion } from 'framer-motion';
-import { LIONS_BREATH_LEVELS } from '../../lib/gameConfig';
-import type { GameLog } from '../../lib/schemas';
-import { db } from '../../lib/schemas';
-import { generateGitaWisdom } from '../../lib/gitaAI';
+import React, { useEffect, useRef, useState } from 'react';
 
-interface LionsBreathProps {
-  childId: string;
-  currentLevel: number;
-  onLevelComplete: (metrics: GameLog) => void;
-}
-
-const TOTAL_LEVELS = 10;
-const MULTIPLIER = 50; // Convert mic volume to 0-100% scale
-
-export default function LionsBreath({ childId, currentLevel, onLevelComplete }: LionsBreathProps) {
-  const levelIndex = Math.min(TOTAL_LEVELS - 1, Math.max(0, currentLevel - 1));
-  const levelConfig = LIONS_BREATH_LEVELS[levelIndex];
-
-  // Game state
-  const [gamePhase, setGamePhase] = useState<'IDLE' | 'CALIBRATING' | 'PLAYING' | 'WON'>('IDLE');
-  const [featherY, setFeatherY] = useState(0);
-  const [volumeLevel, setVolumeLevel] = useState(0);
-  const [breathDuration, setBreathDuration] = useState(0);
-  const [successCount, setSuccessCount] = useState(0);
-  const [errorMessage, setErrorMessage] = useState('');
-
-  // Audio refs
+const LionsBreath: React.FC = () => {
+  // --- REFS ---
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const requestRef = useRef<number>();
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
-  const rafRef = useRef<number | null>(null);
   const dataArrayRef = useRef<Uint8Array | null>(null);
 
-  // Breath tracking refs
-  const lastVolumeRef = useRef(0);
-  const breathStartTimeRef = useRef<number | null>(null);
-  const currentBreathDurationRef = useRef(0);
-  const isBreathingRef = useRef(false);
+  // --- STATE ---
+  const [gameState, setGameState] = useState<'START' | 'PLAYING' | 'WON'>('START');
+  
+  // Mutable Game Data (Performance optimized)
+  const gameData = useRef({
+    orbY: 0,              // Vertical Position
+    velocity: 0,          // Speed
+    targetY: 0,           // Where the Safe Zone is
+    zoneHeight: 150,      // Size of Safe Zone
+    timeInZone: 0,        // Score Timer
+    requiredTime: 10,     // Win Condition (Seconds)
+    micVolume: 0,         // Current Volume
+    particles: [] as { x: number; y: number; vx: number; vy: number; life: number; color: string }[],
+    width: 0,
+    height: 0
+  });
 
-  // Calibration timer
+  // --- CONFIGURATION ---
+  const CONFIG = {
+    gravity: 0.1,             // Very gentle downward pull
+    liftMultiplier: 0.15,     // How much breath lifts the orb
+    friction: 0.96,           // Air resistance (makes it floaty)
+    micThreshold: 15,         // Noise gate
+    zoneColor: 'rgba(167, 243, 208, 0.15)', // Sage Green glow
+    orbColor: '#fbbf24',      // Vedic Gold
+    particleCount: 3          // Particles per frame on exhale
+  };
+
+  // 1. INITIALIZE & RESIZE HANDLER
   useEffect(() => {
-    if (gamePhase === 'CALIBRATING') {
-      const timer = setTimeout(() => {
-        setGamePhase('PLAYING');
-      }, 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [gamePhase]);
+    const handleResize = () => {
+      if (canvasRef.current) {
+        canvasRef.current.width = window.innerWidth;
+        canvasRef.current.height = window.innerHeight;
+        
+        // Reset Position to middle on resize
+        gameData.current.width = window.innerWidth;
+        gameData.current.height = window.innerHeight;
+        gameData.current.orbY = window.innerHeight - 100; // Start near bottom
+        gameData.current.targetY = (window.innerHeight / 2) - 100; // Center-ish
+      }
+    };
 
-  // Initialize microphone and start game - requires user gesture
-  const handleStart = async () => {
+    window.addEventListener('resize', handleResize);
+    handleResize(); // Initial setup
+
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // 2. AUDIO SETUP
+  const startAudio = async () => {
     try {
-      setErrorMessage('');
-      setGamePhase('CALIBRATING');
-      setSuccessCount(0);
-      setFeatherY(0);
-      setVolumeLevel(0);
-      setBreathDuration(0);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      micStreamRef.current = stream;
-
-      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      audioContextRef.current = audioContext;
-
-      // Resume audio context if suspended (required on some browsers)
-      if (audioContext.state === 'suspended') {
-        await audioContext.resume();
-      }
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      audioContextRef.current = new AudioCtx();
+      analyserRef.current = audioContextRef.current.createAnalyser();
       
-      // Force resume by playing a silent source
-      const oscillator = audioContext.createOscillator();
-      const gain = audioContext.createGain();
-      gain.gain.setValueAtTime(0, audioContext.currentTime);
-      oscillator.connect(gain);
-      gain.connect(audioContext.destination);
-      oscillator.start(0);
-      oscillator.stop(0);
+      const source = audioContextRef.current.createMediaStreamSource(stream);
+      source.connect(analyserRef.current);
+      
+      analyserRef.current.fftSize = 256; // 128 data points
+      analyserRef.current.smoothingTimeConstant = 0.8; // Smooths out jittery audio
+      dataArrayRef.current = new Uint8Array(analyserRef.current.frequencyBinCount);
+      
+      // Reset Game
+      gameData.current.timeInZone = 0;
+      gameData.current.velocity = 0;
+      gameData.current.orbY = window.innerHeight - 100;
+      
+      setGameState('PLAYING');
+      requestRef.current = requestAnimationFrame(gameLoop);
 
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 512;
-      analyserRef.current = analyser;
-
-      const bufferLength = analyser.frequencyBinCount;
-      dataArrayRef.current = new Uint8Array(bufferLength);
-
-      const source = audioContext.createMediaStreamSource(stream);
-      source.connect(analyser);
-
-      startAudioLoop();
-    } catch (error: any) {
-      setErrorMessage('Microphone access denied. Please allow microphone access.');
-      setGamePhase('IDLE');
+    } catch (err) {
+      console.error(err);
+      alert("Please allow microphone access to enter the Digital Ashram.");
     }
   };
 
-  // Main audio analysis loop
-  const startAudioLoop = () => {
-    const analyser = analyserRef.current;
-    if (!analyser) return;
+  // 3. MAIN GAME LOOP
+  const gameLoop = () => {
+    if (!canvasRef.current) return;
+    const ctx = canvasRef.current.getContext('2d');
+    if (!ctx) return;
 
-    let smoothVolRef = { current: 0 };
+    // A. Audio Input
+    let vol = 0;
+    if (analyserRef.current && dataArrayRef.current) {
+      analyserRef.current.getByteFrequencyData(dataArrayRef.current);
+      // Average volume calculation
+      const sum = dataArrayRef.current.reduce((a, b) => a + b, 0);
+      vol = sum / dataArrayRef.current.length;
+    }
+    gameData.current.micVolume = vol;
 
-    const analyzeAudio = () => {
-      if (gamePhase === 'WON' || !analyserRef.current || !dataArrayRef.current) return;
+    // B. Physics (The "Float" Logic)
+    // Gravity always pulls down
+    gameData.current.velocity += CONFIG.gravity;
 
-      // Get raw audio data
-      if (analyserRef.current && dataArrayRef.current) {
-        analyserRef.current.getByteTimeDomainData(dataArrayRef.current as any);
+    // Breath pushes UP (Logarithmic lift for control)
+    if (vol > CONFIG.micThreshold) {
+      const lift = Math.log(vol) * CONFIG.liftMultiplier; 
+      gameData.current.velocity -= lift;
+      
+      // Add "Breath Particles"
+      spawnParticles(gameData.current.orbY);
+    }
 
-        // AGGRESSIVE volume calculation with 5x multiplier
-        const average = (dataArrayRef.current.reduce((a, b) => a + b, 0) / dataArrayRef.current.length) * 5;
-        
-        // DIRECT height mapping - any sound immediately moves feather up
-        const targetY = Math.min(90, average);
-        
-        // Set volume display (0-100%)
-        setVolumeLevel(Math.min(100, Math.round(average)));
-        
-        // DEBUG: Log in console for inspection
-        console.log('Volume:', Math.round(average), 'Feather Height:', Math.round(targetY));
+    // Friction/Air Resistance
+    gameData.current.velocity *= CONFIG.friction;
 
-        // Update feather position directly
-        setFeatherY(targetY);
+    // Update Position
+    gameData.current.orbY += gameData.current.velocity;
 
-        // Update volume display (0-100)
-        const displayVol = Math.min(100, (average / 128) * MULTIPLIER);
-        setVolumeLevel(Math.round(displayVol));
+    // Boundaries (Floor/Ceiling)
+    if (gameData.current.orbY > gameData.current.height - 50) {
+      gameData.current.orbY = gameData.current.height - 50;
+      gameData.current.velocity = 0;
+    }
+    if (gameData.current.orbY < 50) {
+      gameData.current.orbY = 50;
+      gameData.current.velocity = 0;
+    }
 
-        // Breath detection logic (only during PLAYING phase)
-        if (gamePhase === 'PLAYING') {
-          const isAboveThreshold = displayVol > levelConfig.volumeThreshold;
+    // C. Win Logic (The Safe Zone)
+    const inZone = 
+      gameData.current.orbY > gameData.current.targetY && 
+      gameData.current.orbY < (gameData.current.targetY + gameData.current.zoneHeight);
 
-          if (isAboveThreshold && !isBreathingRef.current) {
-            // Start of a new breath
-            isBreathingRef.current = true;
-            breathStartTimeRef.current = performance.now();
-            currentBreathDurationRef.current = 0;
-          } else if (isAboveThreshold && isBreathingRef.current) {
-            // Continue current breath
-            const now = performance.now();
-            currentBreathDurationRef.current = (now - (breathStartTimeRef.current || 0)) / 1000;
-            setBreathDuration(parseFloat(currentBreathDurationRef.current.toFixed(1)));
+    if (inZone) {
+      gameData.current.timeInZone += 1/60; // Add frame time
+    } else {
+      // Optional: Gently decay score if they panic? No, let's be kind.
+      // gameData.current.timeInZone = Math.max(0, gameData.current.timeInZone - 0.05);
+    }
 
-            // Check if breath duration meets requirement
-            if (currentBreathDurationRef.current >= levelConfig.durationRequired) {
-              // Successful breath!
-              isBreathingRef.current = false;
-              breathStartTimeRef.current = null;
-              setSuccessCount((prev) => {
-                const newCount = prev + 1;
-                // If 3 breaths completed, trigger win
-                if (newCount >= 3) {
-                  setGamePhase('WON');
-                  handleGameComplete(newCount);
-                }
-                return newCount;
-              });
-            }
-          } else if (!isAboveThreshold && isBreathingRef.current) {
-            // Breath interrupted
-            isBreathingRef.current = false;
-            breathStartTimeRef.current = null;
-            setBreathDuration(0);
-          }
-        }
+    if (gameData.current.timeInZone >= gameData.current.requiredTime) {
+      setGameState('WON');
+      return; // Stop loop
+    }
 
-        lastVolumeRef.current = displayVol;
+    // D. Render Frame
+    draw(ctx, inZone);
+    requestRef.current = requestAnimationFrame(gameLoop);
+  };
+
+  // 4. PARTICLE SYSTEM (Visuals)
+  const spawnParticles = (y: number) => {
+    const x = gameData.current.width / 2;
+    for(let i=0; i < CONFIG.particleCount; i++) {
+      gameData.current.particles.push({
+        x: x + (Math.random() * 40 - 20),
+        y: y + 20,
+        vx: (Math.random() * 2 - 1),
+        vy: (Math.random() * 2), // Fall down
+        life: 1.0,
+        color: `rgba(255, 255, 255, ${Math.random() * 0.5})`
+      });
+    }
+  };
+
+  const updateAndDrawParticles = (ctx: CanvasRenderingContext2D) => {
+    for (let i = gameData.current.particles.length - 1; i >= 0; i--) {
+      const p = gameData.current.particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life -= 0.02;
+
+      if (p.life <= 0) {
+        gameData.current.particles.splice(i, 1);
+      } else {
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2 * p.life, 0, Math.PI * 2);
+        ctx.fill();
       }
-      rafRef.current = requestAnimationFrame(analyzeAudio);
-    };
-
-    rafRef.current = requestAnimationFrame(analyzeAudio);
+    }
   };
 
-  const handleGameComplete = (finalCount: number) => {
-    const metrics: GameLog = {
-      _id: `log_${Date.now()}`,
-      child_id: childId,
-      game_type: 'LIONS_BREATH',
-      level_played: levelIndex + 1,
-      timestamp: new Date(),
-      metrics: {
-        accuracy: 100,
-        time_taken: 0,
-        impulsivity_count: 0,
-        tremor_index: 0,
-        focus_breaks: 0,
-        completion_status: 'WON',
-      },
-      ai_insight: generateGitaWisdom('Child', 'LIONS_BREATH', true, levelIndex + 1),
-      recommended_action: '',
-    };
+  // 5. RENDERER
+  const draw = (ctx: CanvasRenderingContext2D, inZone: boolean) => {
+    const w = gameData.current.width;
+    const h = gameData.current.height;
 
-    db.recordGameLog(metrics);
+    // Background Gradient (Deep Calming Blue/Green)
+    const gradient = ctx.createLinearGradient(0, 0, 0, h);
+    gradient.addColorStop(0, '#0f172a'); // Dark Slate
+    gradient.addColorStop(1, '#064e3b'); // Deep Emerald
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, w, h);
+
+    // Draw Safe Zone (Glowing Band)
+    const zoneY = gameData.current.targetY;
+    const zoneH = gameData.current.zoneHeight;
+    
+    // Zone Glow
+    const zoneGrad = ctx.createLinearGradient(0, zoneY, 0, zoneY + zoneH);
+    zoneGrad.addColorStop(0, 'rgba(52, 211, 153, 0.0)');
+    zoneGrad.addColorStop(0.5, inZone ? 'rgba(52, 211, 153, 0.4)' : 'rgba(52, 211, 153, 0.1)');
+    zoneGrad.addColorStop(1, 'rgba(52, 211, 153, 0.0)');
+    ctx.fillStyle = zoneGrad;
+    ctx.fillRect(0, zoneY, w, zoneH);
+
+    // Zone Borders (Subtle lines)
+    ctx.strokeStyle = 'rgba(52, 211, 153, 0.3)';
+    ctx.beginPath();
+    ctx.moveTo(0, zoneY); ctx.lineTo(w, zoneY);
+    ctx.moveTo(0, zoneY + zoneH); ctx.lineTo(w, zoneY + zoneH);
+    ctx.stroke();
+
+    // Helper Text in Zone
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '16px serif';
+    ctx.textAlign = 'center';
+    ctx.fillText("H O V E R   H E R E", w/2, zoneY + zoneH/2 + 5);
+
+    // Draw Player Orb
+    const orbY = gameData.current.orbY;
+    const centerX = w / 2;
+
+    // Orb Glow
+    const glow = ctx.createRadialGradient(centerX, orbY, 5, centerX, orbY, 40);
+    glow.addColorStop(0, '#FCD34D'); // Bright Gold
+    glow.addColorStop(1, 'rgba(252, 211, 77, 0)'); // Fade out
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(centerX, orbY, 40, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Orb Core
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath();
+    ctx.arc(centerX, orbY, 10, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Particles
+    updateAndDrawParticles(ctx);
+
+    // Progress Bar (Circular or Top Line)
+    const progress = Math.min(gameData.current.timeInZone / gameData.current.requiredTime, 1);
+    ctx.fillStyle = '#34D399';
+    ctx.fillRect(0, 0, w * progress, 8); // Top progress bar
   };
 
-  const cleanup = () => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    if (micStreamRef.current) micStreamRef.current.getTracks().forEach((track) => track.stop());
-    if (audioContextRef.current) audioContextRef.current.close();
-  };
-
-  const handleRetry = () => {
-    cleanup();
-    setGamePhase('IDLE');
-    setSuccessCount(0);
-    setFeatherY(0);
-    setVolumeLevel(0);
-    setBreathDuration(0);
-  };
-
-  const handleNextLevel = () => {
-    cleanup();
-    const metrics: GameLog = {
-      _id: `log_${Date.now()}`,
-      child_id: childId,
-      game_type: 'LIONS_BREATH',
-      level_played: levelIndex + 1,
-      timestamp: new Date(),
-      metrics: {
-        accuracy: 100,
-        time_taken: 0,
-        impulsivity_count: 0,
-        tremor_index: 0,
-        focus_breaks: 0,
-        completion_status: 'WON',
-      },
-      ai_insight: generateGitaWisdom('Child', 'LIONS_BREATH', true, levelIndex + 1),
-      recommended_action: '',
-    };
-    onLevelComplete(metrics);
-  };
-
-  // Cleanup on unmount
+  // Cleanup
   useEffect(() => {
-    return () => cleanup();
+    return () => {
+      if (requestRef.current) cancelAnimationFrame(requestRef.current);
+      if (audioContextRef.current) audioContextRef.current.close();
+    };
   }, []);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-ayur-sky/20 to-ayur-cream p-6 flex flex-col items-center justify-center">
-      {/* Header */}
-      <motion.div className="w-full max-w-2xl mb-6 text-center" initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}>
-        <h1 className="font-playfair text-4xl font-bold text-ayur-slate mb-2">🦁 The Lion's Breath</h1>
-        <p className="font-body text-ayur-slate/60">Level {levelIndex + 1} of {TOTAL_LEVELS}</p>
-      </motion.div>
+    <div className="fixed inset-0 z-50 bg-slate-900 overflow-hidden">
+      {/* THE CANVAS LAYER */}
+      <canvas ref={canvasRef} className="block w-full h-full" />
 
-      {/* Main Game Card */}
-      <motion.div
-        className="w-full max-w-2xl rounded-[40px] bg-white p-8 shadow-2xl"
-        initial={{ opacity: 0, scale: 0.95 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.5 }}
-      >
-        {gamePhase === 'IDLE' && (
-          <div className="flex flex-col items-center justify-center min-h-96 gap-6">
-            <div className="text-8xl">🍃</div>
-            <h2 className="font-playfair text-3xl font-bold text-slate-800">Ready to Start?</h2>
-            <p className="font-body text-slate-700 text-center max-w-md">
-              Breathe steadily to keep the feather floating. You need {levelConfig.durationRequired} second{levelConfig.durationRequired !== 1 ? 's' : ''} of continuous breath to score a point.
-            </p>
-            <button
-              onClick={handleStart}
-              className="px-8 py-4 bg-ayur-gold text-white font-body font-bold rounded-full hover:bg-ayur-olive transition shadow-lg text-lg"
-            >
-              🎤 Start Game & Allow Microphone
-            </button>
-            {errorMessage && <p className="text-red-600 font-body text-sm">{errorMessage}</p>}
+      {/* UI LAYER: START SCREEN */}
+      {gameState === 'START' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm text-white z-10">
+          <h1 className="text-4xl font-serif text-gold-400 mb-2">The Lion's Breath</h1>
+          <p className="text-gray-300 mb-8 max-w-md text-center">
+            Exhale slowly and steadily to float the golden light. 
+            Keep it in the green zone to calm your mind.
+          </p>
+          <button 
+            onClick={startAudio}
+            className="px-8 py-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-full shadow-lg transition-transform hover:scale-105"
+          >
+            Begin Therapy
+          </button>
+        </div>
+      )}
+
+      {/* UI LAYER: WIN SCREEN */}
+      {gameState === 'WON' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-emerald-900/90 backdrop-blur-md text-white z-10">
+          <div className="w-20 h-20 bg-white rounded-full flex items-center justify-center mb-6 animate-pulse">
+            <span className="text-4xl">🕉️</span>
           </div>
-        )}
+          <h2 className="text-3xl font-serif mb-2">Inner Peace Achieved</h2>
+          <p className="text-emerald-100 mb-8">Your Vagus Nerve is now activated.</p>
+          <button 
+            onClick={() => {
+              setGameState('START');
+              // Logic to save score/Karma points goes here
+            }}
+            className="px-8 py-3 border border-white/30 hover:bg-white/10 rounded-full transition"
+          >
+            Practice Again
+          </button>
+        </div>
+      )}
 
-        {gamePhase === 'CALIBRATING' && (
-          <div className="flex flex-col items-center justify-center min-h-96 gap-4">
-            <motion.div
-              className="text-6xl"
-              animate={{ scale: [1, 1.2, 1] }}
-              transition={{ duration: 0.8, repeat: Infinity }}
-            >
-              🎤
-            </motion.div>
-            <p className="font-playfair text-2xl font-bold text-slate-800">Calibrating...</p>
-            <p className="font-body text-slate-600 text-center max-w-md">
-              Getting your microphone ready. Please wait...
-            </p>
-          </div>
-        )}
-
-        {(gamePhase === 'PLAYING' || gamePhase === 'WON') && (
-          <div className="space-y-6">
-            {/* Play Area */}
-            <div
-              className="relative w-full h-80 bg-[#E3F2FD]/50 rounded-3xl border-2 border-[#81D4FA]/50 overflow-hidden"
-              style={{ minHeight: '320px' }}
-            >
-              {/* Feather */}
-              <div
-                style={{
-                  position: 'absolute',
-                  bottom: `${featherY}%`,
-                  left: '50%',
-                  transform: 'translateX(-50%)',
-                  fontSize: '3rem',
-                  zIndex: 50,
-                }}
-              >
-                🪶
-              </div>
-
-              {/* Instructions overlay when idle */}
-              {gamePhase === 'PLAYING' && (
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none bg-gradient-to-b from-transparent via-transparent to-white/10">
-                  <div className="text-center">
-                    <p className="font-body text-sm text-slate-600 font-semibold">
-                      Breathe steadily to lift the feather
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Metric Cards */}
-            <div className="grid grid-cols-3 gap-4">
-              {/* Card 1: Breath Duration (Blue) */}
-              <motion.div
-                className="p-4 bg-gradient-to-br from-blue-100 to-blue-50 rounded-2xl border-2 border-blue-300 text-center"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.1 }}
-              >
-                <p className="font-body text-xs text-slate-700 mb-2 font-semibold">Breath Duration</p>
-                <p className="font-playfair text-2xl font-bold text-blue-600">{breathDuration.toFixed(1)}s</p>
-                <p className="font-body text-xs text-slate-600 mt-1">Target: {levelConfig.durationRequired}s</p>
-              </motion.div>
-
-              {/* Card 2: Volume (Orange) */}
-              <motion.div
-                className="p-4 bg-gradient-to-br from-orange-100 to-orange-50 rounded-2xl border-2 border-orange-300 text-center"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.2 }}
-              >
-                <p className="font-body text-xs text-slate-700 mb-2 font-semibold">Volume</p>
-                <p className="font-playfair text-2xl font-bold text-orange-600">{volumeLevel}%</p>
-                <p className="font-body text-xs text-slate-600 mt-1">Min: {levelConfig.volumeThreshold}</p>
-              </motion.div>
-
-              {/* Card 3: Success (Green) */}
-              <motion.div
-                className="p-4 bg-gradient-to-br from-green-100 to-green-50 rounded-2xl border-2 border-green-300 text-center"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.3 }}
-              >
-                <p className="font-body text-xs text-slate-700 mb-2 font-semibold">Success</p>
-                <p className="font-playfair text-2xl font-bold text-green-600">{successCount}/3</p>
-                <p className="font-body text-xs text-slate-600 mt-1">Need 3 breaths</p>
-              </motion.div>
-            </div>
-
-            {/* Instructions */}
-            {gamePhase === 'PLAYING' && (
-              <motion.div
-                className="p-4 bg-gradient-to-r from-yellow-50 to-yellow-100 rounded-xl border-2 border-yellow-300 text-center"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.4 }}
-              >
-                <p className="font-body text-sm text-slate-800 font-semibold">
-                  {successCount === 0 && '🌱 Start breathing! Hold your breath for the target duration.'}
-                  {successCount === 1 && '⚡ Great! 2 more breaths to go!'}
-                  {successCount === 2 && '🔥 Almost there! One more breath!'}
-                </p>
-              </motion.div>
-            )}
-
-            {/* Win Modal */}
-            {gamePhase === 'WON' && (
-              <motion.div
-                className="fixed inset-0 flex items-center justify-center bg-black/50 z-50"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-              >
-                <motion.div
-                  className="w-full max-w-md p-8 rounded-3xl text-center bg-white shadow-2xl mx-4"
-                  initial={{ scale: 0.8 }}
-                  animate={{ scale: 1 }}
-                >
-                  <p className="text-6xl mb-4">🎉</p>
-                  <p className="font-playfair text-3xl font-bold text-slate-800 mb-2">Level Complete!</p>
-                  <p className="font-body text-slate-700 mb-6">Excellent breath control! 🌬️</p>
-                  <div className="flex gap-4 justify-center flex-wrap">
-                    <button
-                      onClick={handleRetry}
-                      className="px-6 py-3 bg-ayur-gold text-white font-body font-bold rounded-full hover:bg-ayur-olive transition shadow-lg"
-                    >
-                      Retry Level
-                    </button>
-                    {levelIndex + 1 < TOTAL_LEVELS ? (
-                      <button
-                        onClick={handleNextLevel}
-                        className="px-6 py-3 border-2 border-ayur-gold text-ayur-gold bg-white font-body font-bold rounded-full hover:bg-ayur-gold/10 transition shadow-lg"
-                      >
-                        Next Level →
-                      </button>
-                    ) : (
-                      <button
-                        onClick={handleNextLevel}
-                        className="px-6 py-3 border-2 border-emerald-600 text-emerald-600 bg-white font-body font-bold rounded-full hover:bg-emerald-100 transition shadow-lg"
-                      >
-                        Complete Journey ✓
-                      </button>
-                    )}
-                  </div>
-                </motion.div>
-              </motion.div>
-            )}
-          </div>
-        )}
-      </motion.div>
+      {/* UI LAYER: HUD */}
+      {gameState === 'PLAYING' && (
+        <div className="absolute top-4 left-4 text-white/50 text-xs font-mono">
+          MIC INPUT: {Math.round(gameData.current.micVolume)}
+        </div>
+      )}
     </div>
   );
-}
+};
+
+export default LionsBreath;
