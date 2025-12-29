@@ -1,0 +1,9 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "VISION_ENDPOINT": "https://<your-vision-resource>.cognitiveservices.azure.com",
+    "VISION_KEY": "<your-key>"
+  }
+}

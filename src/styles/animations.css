@@ -1,0 +1,104 @@
+/* Custom playful animations (supplementing Tailwind's animate-bounce) */
+@keyframes floaty {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+.floaty {
+  animation: floaty 3s ease-in-out infinite;
+}
+
+/* Gentle bounce variant for buttons/badges */
+@keyframes bounceLite {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+.bounce-lite {
+  animation: bounceLite 1.8s ease-in-out infinite;
+}
+
+@keyframes shimmerGradient {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.gradient-play {
+  background-size: 200% 200%;
+  animation: shimmerGradient 10s ease infinite;
+}
+
+/* Doodle border for playful cards */
+.doodle-card {
+  position: relative;
+}
+.doodle-card::before {
+  content: "";
+  position: absolute;
+  inset: -10px;
+  border: 4px dashed #f97316; /* orange */
+  border-radius: inherit;
+  transform: rotate(-1deg);
+  opacity: 0.95;
+  filter: drop-shadow(0 3px 0 #ef4444) /* red */ drop-shadow(0 -2px 0 #3b82f6) /* blue */;
+  pointer-events: none;
+}
+
+/* Cloud stickers */
+.cloud {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.9;
+}
+.cloud .puff {
+  width: 36px;
+  height: 36px;
+  border-radius: 9999px;
+  background: #fff;
+  box-shadow: 0 6px 12px rgba(0,0,0,0.08);
+}
+.cloud-lg .puff { width: 48px; height: 48px; }
+.cloud-sm .puff { width: 28px; height: 28px; }
+
+/* Cloud positions */
+.cloud-tl { top: 8%; left: 6%; }
+.cloud-tr { top: 12%; right: 8%; }
+.cloud-bl { bottom: 10%; left: 10%; }
+.cloud-br { bottom: 8%; right: 6%; }
+
+/* Jungle & Ocean theme gradients */
+.theme-jungle {
+  background: linear-gradient(135deg, #16a34a 0%, #22c55e 35%, #84cc16 70%, #a7f3d0 100%);
+  background-size: 200% 200%;
+  animation: shimmerGradient 12s ease infinite;
+}
+
+.theme-ocean {
+  background: linear-gradient(135deg, #0ea5e9 0%, #22d3ee 35%, #38bdf8 70%, #a5f3fc 100%);
+  background-size: 200% 200%;
+  animation: shimmerGradient 12s ease infinite;
+}
+
+/* Jungle leaves */
+.leaf {
+  width: 22px;
+  height: 42px;
+  background: #22c55e;
+  border-radius: 60% 60% 10% 60% / 60% 60% 10% 60%;
+  box-shadow: 0 6px 12px rgba(0,0,0,0.08);
+}
+.leaf-dark { background: #16a34a; }
+
+/* Ocean waves */
+.wave {
+  width: 56px;
+  height: 16px;
+  border-radius: 9999px;
+  background: rgba(255,255,255,0.75);
+  box-shadow: 0 6px 12px rgba(0,0,0,0.07);
+}
+.wave-bl { position: absolute; bottom: 10%; left: 8%; }
+.wave-br { position: absolute; bottom: 12%; right: 8%; }

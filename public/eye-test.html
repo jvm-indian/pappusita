@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Eye Test</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+</head>
+<body>
+  <video id="video" autoplay playsinline style="display:none"></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+
+  <script>
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const faceMesh = new FaceMesh({
+      locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    faceMesh.onResults((results) => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+      if (!results.multiFaceLandmarks) return;
+
+      const l = results.multiFaceLandmarks[0];
+
+      // Iris (landmark 475)
+      const iris = l[475];
+      ctx.beginPath();
+      ctx.arc(iris.x * canvas.width, iris.y * canvas.height, 6, 0, 2 * Math.PI);
+      ctx.fillStyle = "red";
+      ctx.fill();
+
+      // Blink detection
+      const blinkDist = l[145].y - l[159].y;
+      ctx.fillStyle = blinkDist < 0.015 ? "lime" : "white";
+      ctx.font = "16px monospace";
+      ctx.fillText(`Blink: ${blinkDist.toFixed(3)}`, 10, 20);
+    });
+
+    const camera = new Camera(video, {
+      onFrame: async () => {
+        await faceMesh.send({ image: video });
+      },
+      width: 640,
+      height: 480
+    });
+
+    camera.start();
+  </script>
+</body>
+</html>
